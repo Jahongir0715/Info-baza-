@@ -1,6 +1,7 @@
 import asyncio
 import re
 import os
+import logging
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
@@ -12,15 +13,13 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+# ==============================
+# 🔐 НАСТРОЙКИ
+# ==============================
 API_TOKEN = '7530739654:AAETWPKYaMWI21BnvDj6f0T70XXZfEWLDVI'
 
-# --- Google Sheets ---
-scope = [
-    'https://spreadsheets.google.com/feeds',
-    'https://www.googleapis.com/auth/drive'
-]
-creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
-client = gspread.authorize(creds)
+EMPLOYEES_SHEET_ID = '1QGXxe3TYXpFEMcglbaHSJrF55EYdZOyxY2ScNhmiQu4'
+REFRESH_INTERVAL_MINUTES = 3
 
 spreadsheet_sources = {
     '1IZhZ0nbDFmbH-dbS91gmZmkZdw7t9PnltE1DOwvvN_0': 'Решенные инциденты',
@@ -31,9 +30,24 @@ spreadsheet_sources = {
     '1CJZeLK-Q_oDVaFinJzdWycymF3IWZkX4QqRmGoJM_m8': 'ТСТ таблица'
 }
 
-EMPLOYEES_SHEET_ID = '1QGXxe3TYXpFEMcglbaHSJrF55EYdZOyxY2ScNhmiQu4'
-REFRESH_INTERVAL_MINUTES = 3
+# ==============================
+# 📝 ЛОГИ
+# ==============================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+# ==============================
+# 📋 GOOGLE SHEETS
+# ==============================
+scope = [
+    'https://spreadsheets.google.com/feeds',
+    'https://www.googleapis.com/auth/drive'
+]
+creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+client = gspread.authorize(creds)
+
+# ==============================
+# 🤖 TELEGRAM BOT
+# ==============================
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -56,6 +70,9 @@ class EmployeeStates(StatesGroup):
     waiting_for_photo = State()
     waiting_for_fio = State()
 
+# ==============================
+# ⚙️ УТИЛИТЫ
+# ==============================
 def normalize(text):
     if not isinstance(text, str):
         return ''
@@ -64,9 +81,12 @@ def normalize(text):
 def contains_cyrillic(text):
     return bool(re.search(r'[А-Яа-яЁё]', text))
 
+# ==============================
+# 📦 РАБОТА С СОТРУДНИЦАМИ
+# ==============================
 async def load_employees_from_sheet():
     global employees
-    employees = []
+    employees.clear()
     try:
         sheet = client.open_by_key(EMPLOYEES_SHEET_ID).sheet1
         rows = sheet.get_all_values()
@@ -77,16 +97,21 @@ async def load_employees_from_sheet():
                 photo_path = os.path.join('employees', photo_filename)
                 if fio and os.path.exists(photo_path):
                     employees.append({"fio": fio, "photo_path": photo_path})
+        logging.info(f"Загружено сотрудниц: {len(employees)}")
     except Exception as e:
-        print("Ошибка загрузки сотрудниц:", e)
+        logging.error(f"Ошибка загрузки сотрудниц: {e}")
 
 async def save_employee_to_sheet(fio, photo_filename):
     try:
         sheet = client.open_by_key(EMPLOYEES_SHEET_ID).sheet1
         sheet.append_row([fio, photo_filename])
+        logging.info(f"Сохранена сотрудница: {fio}")
     except Exception as e:
-        print("Ошибка сохранения сотрудницы:", e)
+        logging.error(f"Ошибка сохранения сотрудницы: {e}")
 
+# ==============================
+# 📊 ОБНОВЛЕНИЕ ТАБЛИЦ
+# ==============================
 async def refresh_sheets_once():
     global sheets
     new_sheets = []
@@ -95,7 +120,7 @@ async def refresh_sheets_once():
             sheet = client.open_by_key(sheet_id).sheet1
             new_sheets.append((sheet, name))
         except Exception as e:
-            print(f"Ошибка загрузки таблицы {name}: {e}")
+            logging.warning(f"Ошибка загрузки таблицы {name}: {e}")
     sheets = new_sheets
 
 async def refresh_sheets_loop():
@@ -104,6 +129,9 @@ async def refresh_sheets_loop():
         await load_employees_from_sheet()
         await asyncio.sleep(REFRESH_INTERVAL_MINUTES * 60)
 
+# ==============================
+# 💬 ОБРАБОТЧИКИ
+# ==============================
 @dp.message(F.text == "/start")
 async def start_cmd(message: Message):
     await message.answer(
@@ -126,11 +154,16 @@ async def add_employee_start(message: Message, state: FSMContext):
 
 @dp.message(F.photo, EmployeeStates.waiting_for_photo)
 async def employee_photo_received(message: Message, state: FSMContext):
-    file = await bot.get_file(message.photo[-1].file_id)
-    photo_bytes = await bot.download_file(file.file_path)
-    await state.update_data(photo_bytes=photo_bytes.read())
-    await message.answer("Фото получено. Теперь отправьте ФИО сотрудницы (только латинскими буквами).")
-    await state.set_state(EmployeeStates.waiting_for_fio)
+    try:
+        file = await bot.get_file(message.photo[-1].file_id)
+        photo_bytes = await bot.download_file(file.file_path)
+        await state.update_data(photo_bytes=photo_bytes.read())
+        await message.answer("Фото получено. Теперь отправьте ФИО сотрудницы (только латинскими буквами).")
+        await state.set_state(EmployeeStates.waiting_for_fio)
+    except Exception as e:
+        logging.error(f"Ошибка при получении фото: {e}")
+        await message.answer("Ошибка при получении фото. Попробуйте снова.")
+        await state.clear()
 
 @dp.message(EmployeeStates.waiting_for_fio)
 async def employee_fio_received(message: Message, state: FSMContext):
@@ -150,14 +183,17 @@ async def employee_fio_received(message: Message, state: FSMContext):
     photo_filename = f"{fio}.jpg"
     photo_path = os.path.join('employees', photo_filename)
 
-    with open(photo_path, 'wb') as f:
-        f.write(photo_bytes)
-
-    employees.append({"fio": fio, "photo_path": photo_path})
-    await save_employee_to_sheet(fio, photo_filename)
-
-    await message.answer(f"✅ Сотрудница '{fio}' добавлена.")
-    await state.clear()
+    try:
+        with open(photo_path, 'wb') as f:
+            f.write(photo_bytes)
+        employees.append({"fio": fio, "photo_path": photo_path})
+        await save_employee_to_sheet(fio, photo_filename)
+        await message.answer(f"✅ Сотрудница '{fio}' добавлена.")
+    except Exception as e:
+        logging.error(f"Ошибка сохранения фото сотрудницы: {e}")
+        await message.answer("Ошибка при сохранении сотрудницы.")
+    finally:
+        await state.clear()
 
 @dp.message()
 async def search_handler(message: Message):
@@ -173,8 +209,12 @@ async def search_handler(message: Message):
     if matches:
         for e in matches:
             if e.get('photo_path') and os.path.exists(e['photo_path']):
-                with open(e['photo_path'], 'rb') as photo:
-                    await message.answer_photo(photo=photo, caption=e['fio'])
+                try:
+                    with open(e['photo_path'], 'rb') as photo:
+                        await message.answer_photo(photo=photo, caption=e['fio'])
+                except Exception as err:
+                    logging.warning(f"Ошибка отправки фото для {e['fio']}: {err}")
+                    await message.answer(f"👤 {e['fio']} (фото не удалось отправить)")
             else:
                 await message.answer(f"👤 {e['fio']} (фото не найдено)")
         return
@@ -193,7 +233,6 @@ async def search_handler(message: Message):
             all_data = sheet.get_all_values()
             if not all_data or len(all_data) < 2:
                 continue
-
             headers = all_data[0]
             rows = all_data[1:]
             for row in rows:
@@ -207,7 +246,7 @@ async def search_handler(message: Message):
                         found_results.append(result)
                         break
     except Exception as e:
-        print("Ошибка поиска в таблицах:", e)
+        logging.error(f"Ошибка поиска в таблицах: {e}")
 
     try:
         await bot.delete_message(chat_id=message.chat.id, message_id=searching_msg.message_id)
@@ -228,6 +267,9 @@ async def search_handler(message: Message):
             reply_markup=keyboard
         )
 
+# ==============================
+# 🚀 MAIN
+# ==============================
 async def main():
     asyncio.create_task(refresh_sheets_loop())
     await refresh_sheets_once()
