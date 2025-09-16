@@ -2,7 +2,10 @@ import asyncio
 import re
 import os
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ContentType, InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from aiogram.types import (
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+)
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -11,7 +14,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 API_TOKEN = '7530739654:AAETWPKYaMWI21BnvDj6f0T70XXZfEWLDVI'
 
-# Google Sheets
+# --- Google Sheets ---
 scope = [
     'https://spreadsheets.google.com/feeds',
     'https://www.googleapis.com/auth/drive'
@@ -41,10 +44,12 @@ employees = []
 if not os.path.exists('employees'):
     os.makedirs('employees')
 
-main_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-main_keyboard.add(
-    KeyboardButton("🔄 Обновить таблицы"),
-    KeyboardButton("➕ Добавить сотрудницу")
+main_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🔄 Обновить таблицы")],
+        [KeyboardButton(text="➕ Добавить сотрудницу")]
+    ],
+    resize_keyboard=True
 )
 
 class EmployeeStates(StatesGroup):
@@ -102,7 +107,7 @@ async def refresh_sheets_loop():
 
 @dp.message(F.text == "/start")
 async def start_cmd(message: Message):
-    await message.reply(
+    await message.answer(
         "👋 Привет! Введи номер заказа, ШК, акта или имя сотрудницы для поиска.\n\n"
         "Или нажми ➕ Добавить сотрудницу, чтобы загрузить фото и ФИО.",
         reply_markup=main_keyboard
@@ -110,14 +115,14 @@ async def start_cmd(message: Message):
 
 @dp.message(F.text == "🔄 Обновить таблицы")
 async def refresh_tables_handler(message: Message):
-    await message.reply("🔄 Обновляю таблицы...")
+    await message.answer("🔄 Обновляю таблицы...")
     await refresh_sheets_once()
     await load_employees_from_sheet()
-    await message.reply("✅ Таблицы обновлены.")
+    await message.answer("✅ Таблицы обновлены.")
 
 @dp.message(F.text == "➕ Добавить сотрудницу")
 async def add_employee_start(message: Message, state: FSMContext):
-    await message.reply("📸 Отправьте фото сотрудницы.")
+    await message.answer("📸 Отправьте фото сотрудницы.")
     await state.set_state(EmployeeStates.waiting_for_photo)
 
 @dp.message(F.photo, EmployeeStates.waiting_for_photo)
@@ -125,7 +130,7 @@ async def employee_photo_received(message: Message, state: FSMContext):
     file = await bot.get_file(message.photo[-1].file_id)
     photo_bytes = await bot.download_file(file.file_path)
     await state.update_data(photo_bytes=photo_bytes.read())
-    await message.reply("Фото получено. Теперь отправьте ФИО сотрудницы (только латинскими буквами).")
+    await message.answer("Фото получено. Теперь отправьте ФИО сотрудницы (только латинскими буквами).")
     await state.set_state(EmployeeStates.waiting_for_fio)
 
 @dp.message(EmployeeStates.waiting_for_fio)
@@ -133,14 +138,14 @@ async def employee_fio_received(message: Message, state: FSMContext):
     fio = message.text.strip()
 
     if contains_cyrillic(fio):
-        await message.reply("❌ Пишите ФИО только латинскими буквами.")
+        await message.answer("❌ Пишите ФИО только латинскими буквами.")
         return
 
     data = await state.get_data()
     photo_bytes = data.get('photo_bytes')
 
     if not fio or not photo_bytes:
-        await message.reply("Ошибка: не получены данные.")
+        await message.answer("Ошибка: не получены данные.")
         return
 
     photo_filename = f"{fio}.jpg"
@@ -152,35 +157,14 @@ async def employee_fio_received(message: Message, state: FSMContext):
     employees.append({"fio": fio, "photo_path": photo_path})
     await save_employee_to_sheet(fio, photo_filename)
 
-    await message.reply(f"✅ Сотрудница '{fio}' добавлена.")
+    await message.answer(f"✅ Сотрудница '{fio}' добавлена.")
     await state.clear()
-
-@dp.message(EmployeeStates.waiting_for_confirm)
-async def confirm_add_employee(message: Message, state: FSMContext):
-    text = message.text.strip().lower()
-    if text == "да":
-        await message.reply("📸 Отправьте фото новой сотрудницы.")
-        await state.set_state(EmployeeStates.waiting_for_photo)
-    else:
-        await message.reply("❌ Добавление отменено.")
-        await state.clear()
-
-@dp.callback_query(F.data.startswith('add_employee_yes:'))
-async def process_add_employee_yes(callback_query: CallbackQuery, state: FSMContext):
-    await callback_query.answer()
-    await bot.send_message(callback_query.from_user.id, "📸 Отправьте фото новой сотрудницы.")
-    await state.set_state(EmployeeStates.waiting_for_photo)
-
-@dp.callback_query(F.data.startswith('add_employee_no:'))
-async def process_add_employee_no(callback_query: CallbackQuery):
-    await callback_query.answer()
-    await bot.send_message(callback_query.from_user.id, "❌ Добавление отменено.")
 
 @dp.message()
 async def search_handler(message: Message):
     query_raw = message.text.strip()
     if not query_raw:
-        await message.reply("Пустой запрос.")
+        await message.answer("Пустой запрос.")
         return
 
     query = query_raw.lower()
@@ -191,19 +175,19 @@ async def search_handler(message: Message):
         for e in matches:
             if e.get('photo_path') and os.path.exists(e['photo_path']):
                 with open(e['photo_path'], 'rb') as photo:
-                    await message.reply_photo(photo=photo, caption=e['fio'])
+                    await message.answer_photo(photo=photo, caption=e['fio'])
             else:
-                await message.reply(f"👤 {e['fio']} (фото не найдено)")
+                await message.answer(f"👤 {e['fio']} (фото не найдено)")
         return
 
     # --- Поиск по таблицам ---
     if not sheets:
-        await message.reply("❌ Таблицы не загружены.")
+        await message.answer("❌ Таблицы не загружены.")
         return
 
     found_results = []
     qnorm = normalize(query_raw)
-    searching_msg = await message.reply("🔍 Ищу информацию по таблицам...")
+    searching_msg = await message.answer("🔍 Ищу информацию по таблицам...")
 
     try:
         for sheet, table_name in sheets:
@@ -216,7 +200,10 @@ async def search_handler(message: Message):
             for row in rows:
                 for i, cell in enumerate(row):
                     if qnorm and qnorm in normalize(cell):
-                        info = "\n".join(f"*{headers[j]}*: {row[j] if j < len(row) else ''}" for j in range(len(headers)))
+                        info = "\n".join(
+                            f"*{headers[j]}*: {row[j] if j < len(row) else ''}"
+                            for j in range(len(headers))
+                        )
                         result = f"📋 *Источник:* {table_name}\n\n{info}"
                         found_results.append(result)
                         break
@@ -230,13 +217,13 @@ async def search_handler(message: Message):
 
     if found_results:
         for res in found_results:
-            await message.reply(res, parse_mode="Markdown")
+            await message.answer(res, parse_mode="Markdown")
     else:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[ 
             InlineKeyboardButton(text="✅ Да", callback_data=f"add_employee_yes:{query_raw}"),
             InlineKeyboardButton(text="❌ Нет", callback_data=f"add_employee_no:{query_raw}")
         ]])
-        await message.reply(
+        await message.answer(
             f"❌ Не нашёл сотрудницу под именем: {query_raw}\n"
             "❓ Хотите добавить новую сотрудницу?",
             reply_markup=keyboard
