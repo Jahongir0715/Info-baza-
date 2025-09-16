@@ -1,12 +1,11 @@
 import asyncio
 import re
 import os
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ContentType, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils import executor
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ContentType, InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -34,7 +33,7 @@ REFRESH_INTERVAL_MINUTES = 3
 
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+dp = Dispatcher(storage=storage)
 
 sheets = []
 employees = []
@@ -101,36 +100,36 @@ async def refresh_sheets_loop():
         await load_employees_from_sheet()
         await asyncio.sleep(REFRESH_INTERVAL_MINUTES * 60)
 
-@dp.message_handler(commands=['start'])
-async def start_cmd(message: types.Message):
+@dp.message(F.text == "/start")
+async def start_cmd(message: Message):
     await message.reply(
         "👋 Привет! Введи номер заказа, ШК, акта или имя сотрудницы для поиска.\n\n"
         "Или нажми ➕ Добавить сотрудницу, чтобы загрузить фото и ФИО.",
         reply_markup=main_keyboard
     )
 
-@dp.message_handler(lambda message: message.text == "🔄 Обновить таблицы")
-async def refresh_tables_handler(message: types.Message):
+@dp.message(F.text == "🔄 Обновить таблицы")
+async def refresh_tables_handler(message: Message):
     await message.reply("🔄 Обновляю таблицы...")
     await refresh_sheets_once()
     await load_employees_from_sheet()
     await message.reply("✅ Таблицы обновлены.")
 
-@dp.message_handler(lambda message: message.text == "➕ Добавить сотрудницу")
-async def add_employee_start(message: types.Message):
+@dp.message(F.text == "➕ Добавить сотрудницу")
+async def add_employee_start(message: Message, state: FSMContext):
     await message.reply("📸 Отправьте фото сотрудницы.")
-    await EmployeeStates.waiting_for_photo.set()
+    await state.set_state(EmployeeStates.waiting_for_photo)
 
-@dp.message_handler(content_types=ContentType.PHOTO, state=EmployeeStates.waiting_for_photo)
-async def employee_photo_received(message: types.Message, state: FSMContext):
+@dp.message(F.photo, EmployeeStates.waiting_for_photo)
+async def employee_photo_received(message: Message, state: FSMContext):
     file = await bot.get_file(message.photo[-1].file_id)
     photo_bytes = await bot.download_file(file.file_path)
     await state.update_data(photo_bytes=photo_bytes.read())
     await message.reply("Фото получено. Теперь отправьте ФИО сотрудницы (только латинскими буквами).")
-    await EmployeeStates.waiting_for_fio.set()
+    await state.set_state(EmployeeStates.waiting_for_fio)
 
-@dp.message_handler(state=EmployeeStates.waiting_for_fio)
-async def employee_fio_received(message: types.Message, state: FSMContext):
+@dp.message(EmployeeStates.waiting_for_fio)
+async def employee_fio_received(message: Message, state: FSMContext):
     fio = message.text.strip()
 
     if contains_cyrillic(fio):
@@ -154,31 +153,31 @@ async def employee_fio_received(message: types.Message, state: FSMContext):
     await save_employee_to_sheet(fio, photo_filename)
 
     await message.reply(f"✅ Сотрудница '{fio}' добавлена.")
-    await state.finish()
+    await state.clear()
 
-@dp.message_handler(state=EmployeeStates.waiting_for_confirm)
-async def confirm_add_employee(message: types.Message, state: FSMContext):
+@dp.message(EmployeeStates.waiting_for_confirm)
+async def confirm_add_employee(message: Message, state: FSMContext):
     text = message.text.strip().lower()
     if text == "да":
         await message.reply("📸 Отправьте фото новой сотрудницы.")
-        await EmployeeStates.waiting_for_photo.set()
+        await state.set_state(EmployeeStates.waiting_for_photo)
     else:
         await message.reply("❌ Добавление отменено.")
-        await state.finish()
+        await state.clear()
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('add_employee_yes:'))
-async def process_add_employee_yes(callback_query: types.CallbackQuery):
-    await bot.answer_callback_query(callback_query.id)
+@dp.callback_query(F.data.startswith('add_employee_yes:'))
+async def process_add_employee_yes(callback_query: CallbackQuery, state: FSMContext):
+    await callback_query.answer()
     await bot.send_message(callback_query.from_user.id, "📸 Отправьте фото новой сотрудницы.")
-    await EmployeeStates.waiting_for_photo.set()
+    await state.set_state(EmployeeStates.waiting_for_photo)
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('add_employee_no:'))
-async def process_add_employee_no(callback_query: types.CallbackQuery):
-    await bot.answer_callback_query(callback_query.id)
+@dp.callback_query(F.data.startswith('add_employee_no:'))
+async def process_add_employee_no(callback_query: CallbackQuery):
+    await callback_query.answer()
     await bot.send_message(callback_query.from_user.id, "❌ Добавление отменено.")
 
-@dp.message_handler()
-async def search_handler(message: types.Message):
+@dp.message()
+async def search_handler(message: Message):
     query_raw = message.text.strip()
     if not query_raw:
         await message.reply("Пустой запрос.")
@@ -233,21 +232,21 @@ async def search_handler(message: types.Message):
         for res in found_results:
             await message.reply(res, parse_mode="Markdown")
     else:
-        # Вместо текстового запроса — отправляем с кнопками Да/Нет
-        keyboard = InlineKeyboardMarkup(row_width=2)
-        keyboard.add(
-            InlineKeyboardButton("✅ Да", callback_data=f"add_employee_yes:{query_raw}"),
-            InlineKeyboardButton("❌ Нет", callback_data=f"add_employee_no:{query_raw}")
-        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Да", callback_data=f"add_employee_yes:{query_raw}"),
+            InlineKeyboardButton(text="❌ Нет", callback_data=f"add_employee_no:{query_raw}")
+        ]])
         await message.reply(
             f"❌ Не нашёл сотрудницу под именем: {query_raw}\n"
             "❓ Хотите добавить новую сотрудницу?",
             reply_markup=keyboard
         )
 
-if __name__ == '__main__':
-    loop = asyncio.get_event_loop()
-    loop.create_task(refresh_sheets_loop())
-    loop.run_until_complete(refresh_sheets_once())
-    loop.run_until_complete(load_employees_from_sheet())
-    executor.start_polling(dp, skip_updates=True)
+async def main():
+    asyncio.create_task(refresh_sheets_loop())
+    await refresh_sheets_once()
+    await load_employees_from_sheet()
+    await dp.start_polling(bot, skip_updates=True)
+
+if __name__ == "__main__":
+    asyncio.run(main())
